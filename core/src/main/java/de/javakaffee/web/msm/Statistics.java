@@ -16,12 +16,11 @@
  */
 package de.javakaffee.web.msm;
 
+import javax.annotation.Nonnull;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
-
-import javax.annotation.Nonnull;
 
 /**
  * @author <a href="mailto:martin.grotzke@javakaffee.de">Martin Grotzke</a>
@@ -223,6 +222,7 @@ public class Statistics {
 
         private boolean _first = true;
         private final AtomicInteger _count = new AtomicInteger();
+        private final AtomicLong _total = new AtomicLong();
         private long _min;
         private long _max;
         private double _avg;
@@ -248,6 +248,7 @@ public class Statistics {
             if ( value > _max || _first ) {
                 _max = value;
             }
+            _total.addAndGet(value);
             _avg = ( _avg * _count.get() + value ) / _count.incrementAndGet();
             _first = false;
         }
@@ -286,10 +287,11 @@ public class Statistics {
          */
         public String[] getInfo() {
             return new String[] {
-                    "Count = " + _count.get(),
-                    "Min = "+ _min,
-                    "Avg = "+ _avg,
-                    "Max = "+ _max
+                    "" + _count.get(),
+                    "" + _min,
+                    "" + _avg,
+                    "" + _max,
+                    "" + _total.get()
             };
         }
 
