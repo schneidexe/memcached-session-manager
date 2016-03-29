@@ -22,6 +22,7 @@ import static de.javakaffee.web.msm.Statistics.StatsType.*;
 import java.beans.PropertyChangeListener;
 import java.io.IOException;
 import java.io.ObjectInputStream;
+import java.io.ObjectOutputStream;
 import java.security.Principal;
 import java.util.Collection;
 import java.util.Map;
@@ -40,7 +41,6 @@ import org.apache.catalina.LifecycleState;
 import org.apache.catalina.Manager;
 import org.apache.catalina.Session;
 import org.apache.catalina.connector.Response;
-import org.apache.catalina.ha.session.SerializablePrincipal;
 import org.apache.catalina.session.ManagerBase;
 import org.apache.catalina.session.StandardSession;
 import org.apache.catalina.util.SessionConfig;
@@ -70,13 +70,20 @@ import de.javakaffee.web.msm.LockingStrategy.LockingMode;
  * @author <a href="mailto:martin.grotzke@javakaffee.de">Martin Grotzke</a>
  * @version $Id$
  */
-public class MemcachedBackupSessionManager extends ManagerBase implements Lifecycle, PropertyChangeListener, MemcachedSessionService.SessionManager {
+public class MemcachedBackupSessionManager extends ManagerBase implements Lifecycle, MemcachedSessionService.SessionManager {
 
     protected static final String NAME = MemcachedBackupSessionManager.class.getSimpleName();
 
     protected final Log _log = LogFactory.getLog( getClass() );
 
     protected MemcachedSessionService _msm;
+
+    /**
+     * The default maximum inactive interval for Sessions created by
+     * this Manager.
+     * Used instead of Context.sessionTimeout to allow tests to set more fine grained session timeouts.
+     */
+    private int _maxInactiveInterval = 30 * 60;
 
     private Boolean _contextHasFormBasedSecurityConstraint;
 
@@ -123,7 +130,7 @@ public class MemcachedBackupSessionManager extends ManagerBase implements Lifecy
 
     @Override
     public MemcachedBackupSession createSession( final String sessionId ) {
-        return _msm.createSession( sessionId );
+        return _msm.createSession(sessionId);
     }
 
     @Override
@@ -140,7 +147,7 @@ public class MemcachedBackupSessionManager extends ManagerBase implements Lifecy
      * {@inheritDoc}
      */
     @Override
-    public synchronized String generateSessionId() {
+    public String generateSessionId() {
         return _msm.newSessionId( super.generateSessionId() );
     }
 
@@ -153,7 +160,7 @@ public class MemcachedBackupSessionManager extends ManagerBase implements Lifecy
             _log.debug( "expireSession invoked: " + sessionId );
         }
         super.expireSession( sessionId );
-        _msm.deleteFromMemcached( sessionId );
+        _msm.deleteFromMemcached(sessionId);
     }
 
     /**
@@ -161,12 +168,12 @@ public class MemcachedBackupSessionManager extends ManagerBase implements Lifecy
      */
     @Override
     public void remove( final Session session, final boolean update ) {
-        removeInternal( session, update, session.getNote( MemcachedSessionService.NODE_FAILURE ) != Boolean.TRUE );
+        removeInternal(session, update, session.getNote(MemcachedSessionService.NODE_FAILURE) != Boolean.TRUE);
     }
 
     @Override
     public void removeInternal( final Session session, final boolean update ) {
-        super.remove( session, update );
+        super.remove(session, update);
     }
 
     private void removeInternal( final Session session, final boolean update, final boolean removeFromMemcached ) {
@@ -206,7 +213,19 @@ public class MemcachedBackupSessionManager extends ManagerBase implements Lifecy
         // e.g. invoked by the AuthenticatorBase (for BASIC auth) on login to prevent session fixation
         // so that session backup won't be omitted we must store this event
         super.changeSessionId( session );
-        ((MemcachedBackupSession)session).setSessionIdChanged( true );
+        ((MemcachedBackupSession)session).setSessionIdChanged(true);
+    }
+
+    public int getMaxInactiveInterval() {
+        return _maxInactiveInterval;
+    }
+
+    public void setMaxInactiveInterval(int interval) {
+        int oldMaxInactiveInterval = _maxInactiveInterval;
+        _maxInactiveInterval = interval;
+        support.firePropertyChange("maxInactiveInterval",
+                Integer.valueOf(oldMaxInactiveInterval),
+                Integer.valueOf(_maxInactiveInterval));
     }
 
     /**
@@ -316,7 +335,7 @@ public class MemcachedBackupSessionManager extends ManagerBase implements Lifecy
      *            the sessionAttributeNames to set
      */
     public void setSessionAttributeFilter( @Nullable final String sessionAttributeFilter ) {
-        _msm.setSessionAttributeFilter( sessionAttributeFilter );
+        _msm.setSessionAttributeFilter(sessionAttributeFilter);
     }
 
     /**
@@ -336,7 +355,7 @@ public class MemcachedBackupSessionManager extends ManagerBase implements Lifecy
      * @param transcoderFactoryClassName the {@link TranscoderFactory} class name.
      */
     public void setTranscoderFactoryClass( final String transcoderFactoryClassName ) {
-        _msm.setTranscoderFactoryClass( transcoderFactoryClassName );
+        _msm.setTranscoderFactoryClass(transcoderFactoryClassName);
     }
 
     /**
@@ -363,7 +382,7 @@ public class MemcachedBackupSessionManager extends ManagerBase implements Lifecy
      *            shall be used.
      */
     public void setCopyCollectionsForSerialization( final boolean copyCollectionsForSerialization ) {
-        _msm.setCopyCollectionsForSerialization( copyCollectionsForSerialization );
+        _msm.setCopyCollectionsForSerialization(copyCollectionsForSerialization);
     }
 
     /**
@@ -389,7 +408,7 @@ public class MemcachedBackupSessionManager extends ManagerBase implements Lifecy
      * @param customConverterClassNames a list of class names separated by comma
      */
     public void setCustomConverter( final String customConverterClassNames ) {
-        _msm.setCustomConverter( customConverterClassNames );
+        _msm.setCustomConverter(customConverterClassNames);
     }
 
     /**
@@ -405,7 +424,7 @@ public class MemcachedBackupSessionManager extends ManagerBase implements Lifecy
      * @param enableStatistics <code>true</code> if statistics shall be gathered.
      */
     public void setEnableStatistics( final boolean enableStatistics ) {
-        _msm.setEnableStatistics( enableStatistics );
+        _msm.setEnableStatistics(enableStatistics);
     }
 
     /**
@@ -433,7 +452,7 @@ public class MemcachedBackupSessionManager extends ManagerBase implements Lifecy
      * @param memcachedProtocol one of "text" or "binary".
      */
     public void setMemcachedProtocol( final String memcachedProtocol ) {
-        _msm.setMemcachedProtocol( memcachedProtocol );
+        _msm.setMemcachedProtocol(memcachedProtocol);
     }
 
     /**
@@ -492,7 +511,7 @@ public class MemcachedBackupSessionManager extends ManagerBase implements Lifecy
 
     @Override
     public void setLockingMode( @Nullable final LockingMode lockingMode, @Nullable final Pattern uriPattern, final boolean storeSecondaryBackup ) {
-        _msm.setLockingMode( lockingMode, uriPattern, storeSecondaryBackup );
+        _msm.setLockingMode(lockingMode, uriPattern, storeSecondaryBackup);
     }
 
     @Override
@@ -544,7 +563,7 @@ public class MemcachedBackupSessionManager extends ManagerBase implements Lifecy
             return;
         }
         session.passivate();
-        removeInternal( session, true );
+        removeInternal(session, true);
         session.recycle();
     }
 
@@ -604,7 +623,7 @@ public class MemcachedBackupSessionManager extends ManagerBase implements Lifecy
 
     /**
      * The timeout in milliseconds after that a session backup is considered as
-     * beeing failed when {@link #getSessionBackupAsync()}) is <code>false</code>.
+     * beeing failed when {@link #isSessionBackupAsync()}) is <code>false</code>.
      */
     public long getSessionBackupTimeout() {
         return _msm.getSessionBackupTimeout();
@@ -864,8 +883,13 @@ public class MemcachedBackupSessionManager extends ManagerBase implements Lifecy
     }
 
     @Override
+    public void writePrincipal( @Nonnull Principal principal, @Nonnull ObjectOutputStream oos) throws IOException {
+        oos.writeObject(principal);
+    }
+
+    @Override
     public Principal readPrincipal( final ObjectInputStream ois ) throws ClassNotFoundException, IOException {
-        return SerializablePrincipal.readPrincipal( ois );
+        return (Principal) ois.readObject();
     }
 
     public boolean contextHasFormBasedSecurityConstraint(){

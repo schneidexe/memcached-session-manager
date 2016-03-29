@@ -417,7 +417,7 @@ public abstract class NonStickySessionsIntegrationTest {
      * Tests that for auto locking mode requests that are found to be readonly don't lock
      * the session
      */
-    @Test
+    @Test( enabled = true )
     public void testReadOnlyRequestsDontLockSessionForAutoLocking() throws IOException, InterruptedException, HttpException, ExecutionException {
 
         setLockingMode( LockingMode.AUTO, null );
@@ -480,7 +480,7 @@ public abstract class NonStickySessionsIntegrationTest {
      * Tests that for uriPattern locking mode requests that don't match the pattern the
      * session is not locked.
      */
-    @Test
+    @Test( enabled = true )
     public void testRequestsDontLockSessionForNotMatchingUriPattern() throws IOException, InterruptedException, HttpException, ExecutionException {
 
         final String pathToLock = "/locksession";
@@ -783,7 +783,7 @@ public abstract class NonStickySessionsIntegrationTest {
 	}
 
     @Test( enabled = true )
-    public void testSessionNotLoadedForReadonlyRequest() throws IOException, HttpException, InterruptedException {
+    public void testSessionNotLoadedForNoSessionAccess() throws IOException, HttpException, InterruptedException {
         _tomcat1.getManager().setMemcachedNodes( NODE_ID_1 + ":localhost:" + MEMCACHED_PORT_1 );
         waitForReconnect(_tomcat1.getService().getMemcached(), 1, 1000);
 
@@ -800,9 +800,19 @@ public abstract class NonStickySessionsIntegrationTest {
         get( _httpClient, TC_PORT_1, PATH_NO_SESSION_ACCESS, sessionId1 );
 
         assertWaitingWithProxy(equalTo(3), 1000, _daemon1.getCache()).getSetCmds();
-        assertEquals( _daemon1.getCache().getGetHits(), 1 );
+
+        // For TC7 the session is looked up by AuthenticatorBase.invoke(AuthenticatorBase.java:430) (TC 7.0.67) which seems
+        // to be installed and always check the user principal - therefore we have 2 hits for the session and the validity info.
+        // And we want to allow context level valves to access the session (issue #286), therefore we load the session even
+        // if our context valve has not been passed (i.e. findSession is not directly triggered from the webapp).
+        //
+        // For TC{6,8} there's no call from AuthenticatorBase, so there's only 1 hit (validity info)
+        assertEquals( _daemon1.getCache().getGetHits(), getExpectedHitsForNoSessionAccess());
     }
 
+    protected int getExpectedHitsForNoSessionAccess() {
+        return 1;
+    }
 
     /**
      * Ignored resources (requests matching uriIgnorePattern) should neither load the session
@@ -922,6 +932,7 @@ public abstract class NonStickySessionsIntegrationTest {
         // and should not update the session in memcached.
         final Response tc1Response2 = get(_httpClient, TC_PORT_1, "/pixel.gif", sessionId);
         assertNull(tc1Response2.getResponseSessionId());
+        assertEquals(tc1Response2.getStatusCode(), 200);
 
         // load session + validity info for pixel.gif
         assertEquals( _daemon1.getCache().getGetHits(), 8 );

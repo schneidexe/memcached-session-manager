@@ -24,6 +24,7 @@ import static de.javakaffee.web.msm.Statistics.StatsType.SESSION_DESERIALIZATION
 
 import java.io.IOException;
 import java.io.ObjectInputStream;
+import java.io.ObjectOutputStream;
 import java.security.Principal;
 import java.util.List;
 import java.util.Map;
@@ -215,7 +216,7 @@ public class MemcachedSessionService {
      * this cache is also used to track sessions that are not existing in memcached
      * or that got invalidated, to be able to handle backupSession (in non-sticky mode) correctly.
      */
-    private final LRUCache<String, Boolean> _invalidSessionsCache = new LRUCache<String, Boolean>( 2000, 5000 );
+    private final LRUCache<String, Boolean> _invalidSessionsCache = new LRUCache<String, Boolean>( 2000, 500 );
 
 	private MemcachedNodesManager _memcachedNodesManager;
 
@@ -295,6 +296,9 @@ public class MemcachedSessionService {
          */
         String getString(final String key, final Object... args);
 
+        int getMaxInactiveInterval();
+        void setMaxInactiveInterval(int interval);
+
         int getMaxActiveSessions();
         void incrementSessionCounter();
         void incrementRejectedSessions();
@@ -319,17 +323,24 @@ public class MemcachedSessionService {
         MemcachedSessionService getMemcachedSessionService();
 
         /**
-         * Return the Container with which this Manager is associated.
+         * Return the Context with which this Manager is associated.
          */
-        @Override
         @Nonnull
-        Container getContainer();
+        Context getContext();
 
         /**
          * Return the Context with which this Manager is associated.
          */
         @Nonnull
         ClassLoader getContainerClassLoader();
+
+        /**
+         * Writes the given Principal to the provided output stream.
+         * @param principal the principal
+         * @param oos the output stream
+         * @throws IOException expected to be declared by the implementation.
+         */
+        void writePrincipal( @Nonnull Principal principal, @Nonnull ObjectOutputStream oos) throws IOException;
 
         /**
          * Reads the Principal from the given OIS.
@@ -385,8 +396,8 @@ public class MemcachedSessionService {
 
     public void shutdown() {
         _log.info( "Stopping services." );
-        _manager.getContainer().getParent().getPipeline().removeValve(_trackingHostValve);
-        _manager.getContainer().getPipeline().removeValve(_trackingContextValve);
+        _manager.getContext().getParent().getPipeline().removeValve(_trackingHostValve);
+        _manager.getContext().getPipeline().removeValve(_trackingContextValve);
         _backupSessionService.shutdown();
         if ( _lockingStrategy != null ) {
             _lockingStrategy.shutdown();
@@ -429,7 +440,7 @@ public class MemcachedSessionService {
         final String sessionCookieName = _manager.getSessionCookieName();
         _currentRequest = new CurrentRequest();
         _trackingHostValve = createRequestTrackingHostValve(sessionCookieName, _currentRequest);
-        final Context context = (Context) _manager.getContainer();
+        final Context context = _manager.getContext();
         context.getParent().getPipeline().addValve(_trackingHostValve);
         _trackingContextValve = createRequestTrackingContextValve(sessionCookieName);
         context.getPipeline().addValve( _trackingContextValve );
@@ -474,7 +485,7 @@ public class MemcachedSessionService {
 	}
 
     protected MemcachedNodesManager createMemcachedNodesManager(final String memcachedNodes, final String failoverNodes) {
-        final Context context = (Context) _manager.getContainer();
+        final Context context = _manager.getContext();
         final String webappVersion = Reflections.invoke(context, "getWebappVersion", null);
         final StorageKeyFormat storageKeyFormat = StorageKeyFormat.of(_storageKeyPrefix, context.getParent().getName(), context.getName(), webappVersion);
 		return MemcachedNodesManager.createFor( memcachedNodes, failoverNodes, storageKeyFormat, _memcachedClientCallback );
@@ -564,20 +575,19 @@ public class MemcachedSessionService {
             }
         }
         else if ( canHitMemcached( id ) && _invalidSessionsCache.get( id ) == null ) {
-            // when the request comes from the container, it's from CoyoteAdapter.postParseRequest
-            // or AuthenticatorBase.invoke (for some kind of security-constraint, where a form-based
-            // constraint needs the session to get the authenticated principal)
-            if ( !_sticky && isContainerSessionLookup()
-                    && !_manager.contextHasFormBasedSecurityConstraint() ) {
-                // we can return just null as the requestedSessionId will still be set on
-                // the request.
-                return null;
-            }
 
             // If no current request is set (RequestTrackerHostValve was not passed) we got invoked
             // by CoyoteAdapter.parseSessionCookiesId - here we can just return null, the requestedSessionId
-            // will be accepted anyway
-            if(!_sticky && _currentRequest.get() == null) {
+            // will be accepted anyway.
+            // If form based security is used, then AuthenticatorBase.invoke might ask for the session (to get the authenticated principal),
+            // in this case we must return the session because valid requests would be rejected otherwise.
+            if(!_sticky && (
+                    isConnectorSessionLookup()
+                    || _trackingHostValve.isIgnoredRequest() && !_manager.contextHasFormBasedSecurityConstraint())) {
+                if(_log.isDebugEnabled()) {
+                    _log.debug("Returning for session id " + id + " (isConnectorSessionLookup: "+ isConnectorSessionLookup() +
+                            ", isIgnoredRequest: " + _trackingHostValve.isIgnoredRequest() + ")");
+                }
                 return null;
             }
 
@@ -616,6 +626,15 @@ public class MemcachedSessionService {
      */
     private boolean isContainerSessionLookup() {
         return !_trackingContextValve.wasInvokedWith(_currentRequest.get());
+    }
+
+    /**
+     * Determines if the request has already passed the RequestTrackerHostValve or not.
+     * If not, e.g. CoyoteAdapter.parseSessionCookiesId (invoked from CoyoteAdapter.postParseRequest) might ask
+     * for the session.
+     */
+    private boolean isConnectorSessionLookup() {
+        return _currentRequest.get() == null;
     }
 
     private void addValidLoadedSession(final MemcachedBackupSession result) {
@@ -674,12 +693,26 @@ public class MemcachedSessionService {
             request.setNote(NEW_SESSION_ID, sessionId);
         }
 
+        // we must register us as holding a reference, otherwise we might remove the session too early. (#283)
+        if(!_sticky) {
+            // synchronized to have correct refcounts
+            synchronized (_manager.getSessionsInternal()) {
+                session.registerReference();
+            }
+        }
+
         if ( _log.isDebugEnabled() ) {
             _log.debug( "Created new session with id " + session.getId() );
         }
 
         _manager.incrementSessionCounter();
-
+        //if the new session exist in _invalidSessionsCache, we should remove it marking this session valid.(#284)
+        if( _invalidSessionsCache.containsKey(session.getId()) ){
+            if ( _log.isDebugEnabled() ) {
+                _log.debug( "Remove session id  " + session.getId() + "  from _invalidSessionsCache, marking new session valid" );
+            }
+            _invalidSessionsCache.remove(session.getId());            
+        }
         return session;
 
     }
@@ -748,6 +781,14 @@ public class MemcachedSessionService {
         final String localJvmRoute = _manager.getJvmRoute();
         if ( localJvmRoute != null && !localJvmRoute.equals( getSessionIdFormat().extractJvmRoute( requestedSessionId ) ) ) {
 
+            // the session might already be relocated, e.g. if some ajax calls are running concurrently.
+            // if we'd run session takeover again, a new empty session would be created.
+            // see https://github.com/magro/memcached-session-manager/issues/282
+            final String newSessionId = _memcachedNodesManager.changeSessionIdForTomcatFailover(requestedSessionId, _manager.getJvmRoute());
+            if (_manager.getSessionInternal(newSessionId) != null) {
+                return newSessionId;
+            }
+
             // the session might have been loaded already (by some valve), so let's check our session map
             MemcachedBackupSession session = _manager.getSessionInternal( requestedSessionId );
             if ( session == null ) {
@@ -757,6 +798,8 @@ public class MemcachedSessionService {
             // checking valid() can expire() the session!
             if ( session != null && session.isValid() ) {
                 return handleSessionTakeOver( session );
+            } else if (_manager.getSessionInternal(newSessionId) != null) {
+                return newSessionId;
             }
         }
         return null;
@@ -783,11 +826,14 @@ public class MemcachedSessionService {
 
         session.setIdInternal( newSessionId );
 
-        addValidLoadedSession( session, true );
+        // a concurrent/earlier request might already have added the session (#282)
+        if ( !_manager.getSessionsInternal().containsKey( newSessionId ) ) {
+            addValidLoadedSession(session, true);
 
-        deleteFromMemcached( origSessionId );
+            deleteFromMemcached(origSessionId);
 
-        _statistics.requestWithTomcatFailover();
+            _statistics.requestWithTomcatFailover();
+        }
 
         return newSessionId;
 
@@ -1537,7 +1583,7 @@ public class MemcachedSessionService {
     protected void updateExpirationInMemcached() {
         if ( _enabled.get() && _sticky ) {
             final Session[] sessions = _manager.findSessions();
-            final int delay = _manager.getContainer().getBackgroundProcessorDelay();
+            final int delay = _manager.getContext().getBackgroundProcessorDelay();
             for ( final Session s : sessions ) {
                 final MemcachedBackupSession session = (MemcachedBackupSession) s;
                 if ( _log.isDebugEnabled() ) {
